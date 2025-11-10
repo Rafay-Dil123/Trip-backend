@@ -85,3 +85,17 @@ MIT License © 2025 Your Name
 ## Contact
 
 Questions or feedback? Open an issue or email [dilrafay@gmail.com](mailto:dilrafay@gmail.com).
+
+---
+
+## 🗺️ API Flow Diagram
+
+```mermaid
+flowchart TD
+    A[Client hits /calculate endpoint] --> B[Extract lat/lon using Geocode API]
+    B --> C[Get route geometry & distance from Route API]
+    C --> D[Apply business logic (duty blocks, stops, etc.)]
+    D --> E[Generate ELD sheets from duty blocks]
+    E --> F[Store Trip object in database]
+    F --> G[Send response to client]
+```
