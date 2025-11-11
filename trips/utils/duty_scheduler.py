@@ -15,7 +15,15 @@ from trips.constants.scheduler_constants import (
 def generate_duty_blocks(
     current_to_pickup_miles, pickup_to_dropoff_miles, current_cycle_used=0
 ):
+    """
+    HOS Compliant Duty Block Generator for Property-Carrying Driver
+    ASSUMPTIONS:
+    - Property-carrying driver, 70hrs/8days, no adverse driving conditions
+    - Fueling at least once every 1,000 miles
+    - 1 hour for pickup and drop-off
 
+    Returns: (duty_blocks, cycle_used) - maintaining your exact format
+    """
     if current_cycle_used > CYCLE_LIMIT_HOURS:
         raise ValueError(
             f"Driver starts in violation: {current_cycle_used}h > {CYCLE_LIMIT_HOURS}h cycle limit"
@@ -116,13 +124,48 @@ def generate_duty_blocks(
                 day_driving = 0
         return blocks, day_on_duty, day_driving, day, cycle_used
 
+    def calculate_fuel_stops_required(distance):
+        """Calculate fuel stops based on 1000-mile interval assumption"""
+        if distance <= FUEL_INTERVAL_MILES:
+            return 0
+        # Fuel every 1000 miles as per assumption
+        return int((distance - 1) // FUEL_INTERVAL_MILES)
+
+    def plan_fuel_stops(total_distance, fuel_stops_required):
+        """Plan where fuel stops should occur in the journey"""
+        if fuel_stops_required == 0:
+            return []
+
+        fuel_stop_points = []
+        for i in range(1, fuel_stops_required + 1):
+            stop_point = i * FUEL_INTERVAL_MILES
+            if stop_point < total_distance:
+                fuel_stop_points.append(stop_point)
+
+        return fuel_stop_points
+
     def drive_segment(
         remaining_distance, label, day_on_duty, day_driving, day, cycle_used
     ):
-        """Drive between two points respecting HOS rules, fuel stops, and cycle reset."""
-        while remaining_distance > 0:
+        """Drive between two points with planned fuel stops every 1000 miles"""
+        total_segment_distance = remaining_distance
+        fuel_stops_required = calculate_fuel_stops_required(total_segment_distance)
+        fuel_stop_points = plan_fuel_stops(total_segment_distance, fuel_stops_required)
 
-            segment_distance = min(FUEL_INTERVAL_MILES, remaining_distance)
+        distance_driven = 0
+        next_fuel_stop_index = 0
+
+        while remaining_distance > 0:
+            if next_fuel_stop_index < len(fuel_stop_points):
+                next_stop_distance = (
+                    fuel_stop_points[next_fuel_stop_index] - distance_driven
+                )
+                is_fuel_stop = True
+            else:
+                next_stop_distance = remaining_distance
+                is_fuel_stop = False
+
+            segment_distance = min(next_stop_distance, remaining_distance)
             driving_hours = segment_distance / AVG_SPEED_MPH
 
             reset_blocks, day_on_duty, day_driving, day, cycle_used = (
@@ -141,9 +184,14 @@ def generate_duty_blocks(
                 cycle_used,
             )
             duty_blocks.extend(blocks)
+
+            distance_driven += segment_distance
             remaining_distance -= segment_distance
 
-            if remaining_distance > 0:
+            if (
+                is_fuel_stop
+                and abs(distance_driven - fuel_stop_points[next_fuel_stop_index]) < 1.0
+            ):
                 reset_blocks, day_on_duty, day_driving, day, cycle_used = (
                     ensure_cycle_compliance(
                         day_on_duty, day_driving, day, cycle_used, FUEL_STOP_HOURS
@@ -160,13 +208,14 @@ def generate_duty_blocks(
                     cycle_used,
                 )
                 duty_blocks.extend(blocks)
+                next_fuel_stop_index += 1
 
         return day_on_duty, day_driving, day, cycle_used
 
     def add_pickup_dropoff_activity(
         activity_type, day_on_duty, day_driving, day, cycle_used
     ):
-        """Safely add pickup or dropoff activity with cycle reset check."""
+        """Add 1-hour pickup or dropoff activity as per assumption"""
         reset_blocks, day_on_duty, day_driving, day, cycle_used = (
             ensure_cycle_compliance(
                 day_on_duty, day_driving, day, cycle_used, PICKUP_DROP_HOURS
