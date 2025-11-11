@@ -2,6 +2,8 @@ from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
 from typing import Dict, List
 from collections import defaultdict
+from io import BytesIO
+import os
 
 
 def generate_eld_sheet(
@@ -19,12 +21,10 @@ def generate_eld_sheet(
     """
     daily_info = daily_info or {}
 
-    # Page setup
     width, height = 1500, 1800
     img = Image.new("RGB", (width, height), color="white")
     draw = ImageDraw.Draw(img)
 
-    # Fonts
     try:
         title_font = ImageFont.truetype(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26
@@ -43,7 +43,6 @@ def generate_eld_sheet(
 
     y_pos = 20
 
-    # --- DOT Form Top Headings ---
     draw.text(
         (50, y_pos), "U.S. DEPARTMENT OF TRANSPORTATION", font=normal_font, fill="black"
     )
@@ -61,7 +60,6 @@ def generate_eld_sheet(
     )
 
     y_pos += 60
-    # Date boxes
     date_str = daily_info.get("date", datetime.now().strftime("%m/%d/%Y"))
     month, day, year = date_str.split("/")
     draw.text((50, y_pos), month, font=title_font, fill="black")
@@ -71,14 +69,12 @@ def generate_eld_sheet(
     draw.text((150, y_pos + 30), "(DAY)", font=small_font, fill="black")
     draw.text((250, y_pos + 30), "(YEAR)", font=small_font, fill="black")
 
-    # Total miles today
     total_miles = daily_info.get("total_miles_today", 0)
     draw.text((400, y_pos), str(total_miles), font=title_font, fill="black")
     draw.text(
         (400, y_pos + 30), "(TOTAL MILES DRIVING TODAY)", font=small_font, fill="black"
     )
 
-    # Vehicle numbers
     vehicle_number = daily_info.get("vehicle_number", "ABC-123")
     draw.text((1000, y_pos + 20), vehicle_number, font=title_font, fill="black")
     draw.text(
@@ -89,7 +85,6 @@ def generate_eld_sheet(
     )
 
     y_pos += 90
-    # Carrier name and address
     carrier_name = daily_info.get("carrier_name", "John Doe's Transportation")
     carrier_address = daily_info.get("home_terminal_address", "Washington, D.C.")
     draw.text((50, y_pos), carrier_name, font=title_font, fill="black")
@@ -99,8 +94,7 @@ def generate_eld_sheet(
     draw.text((50, y_pos + 60), carrier_address, font=title_font, fill="black")
     draw.text((50, y_pos + 90), "(MAIN OFFICE ADDRESS)", font=small_font, fill="black")
 
-    # Driver signature and co-driver
-    driver_sig = daily_info.get("driver_signature", "John E. Doe")
+    driver_sig = daily_info.get("driver_signature", "________________")
     co_driver = daily_info.get("co_driver", "________________")
     draw.text((700, y_pos), driver_sig, font=title_font, fill="black")
     draw.text(
@@ -109,7 +103,6 @@ def generate_eld_sheet(
     draw.text((700, y_pos + 60), co_driver, font=title_font, fill="black")
     draw.text((700, y_pos + 90), "(NAME OF CO-DRIVER)", font=small_font, fill="black")
 
-    # --- 24-Hour Grid ---
     y_pos += 100
     draw.text(
         (50, y_pos),
@@ -152,7 +145,7 @@ def generate_eld_sheet(
             width=1,
         )
         draw.text(
-            (col_x + 5, grid_y_start - 23), f"{h}:00", font=small_font, fill="black"
+            (col_x + 5, grid_y_start - 23), f"{h:02d}:00", font=small_font, fill="black"
         )
 
     for row_idx in range(len(activity_labels)):
@@ -164,65 +157,89 @@ def generate_eld_sheet(
             draw.rectangle(
                 [(col_x1, row_y1), (col_x2, row_y2)], outline="black", width=1
             )
+            # Half-hour guide line
             draw.line(
                 [(col_x1 + col_width / 2, row_y1), (col_x1 + col_width / 2, row_y2)],
                 fill="gray",
                 width=1,
             )
 
-    block_pointer = 0.0
-    for idx, block in enumerate(duty_blocks, start=1):
-        act = block["activity"].split("(")[0].strip().lower().replace(" ", "_")
-        if act not in activities:
-            continue
-        row_idx = activities.index(act)
-        hours_filled = block["hours"]
-        color = activity_colors.get(act, "lightgray")
+    def map_activity_to_status(activity_str):
+        activity_lower = activity_str.lower()
+        if "off-duty" in activity_lower or "rest" in activity_lower:
+            return "off_duty"
+        elif "sleeper" in activity_lower:
+            return "sleeper_berth"
+        elif "driving" in activity_lower:
+            return "driving"
+        elif (
+            "on-duty" in activity_lower
+            or "pickup" in activity_lower
+            or "dropoff" in activity_lower
+            or "fuel" in activity_lower
+        ):
+            return "on_duty"
+        else:
+            return "off_duty"  
 
-        while hours_filled > 0 and int(block_pointer) < hours_per_day:
-            col_x1 = grid_x_start + int(block_pointer) * col_width
-            col_x2 = col_x1 + col_width
+    current_hour = 0.0
+    for block_idx, block in enumerate(duty_blocks, start=1):
+        activity_status = map_activity_to_status(block["activity"])
+        hours_needed = block["hours"]
+
+        if activity_status not in activities:
+            continue
+
+        row_idx = activities.index(activity_status)
+        color = activity_colors.get(activity_status, "lightgray")
+
+        while hours_needed > 0 and current_hour < hours_per_day:
+            hours_to_fill = min(hours_needed, 1.0 - (current_hour % 1.0))
+            if hours_to_fill <= 0:
+                hours_to_fill = min(hours_needed, 1.0)
+
+            start_col = int(current_hour)
+            start_fraction = current_hour - start_col
+            col_x1 = grid_x_start + start_col * col_width + (start_fraction * col_width)
+            col_x2 = col_x1 + (hours_to_fill * col_width)
+
             row_y1 = grid_y_start + row_idx * row_height
             row_y2 = row_y1 + row_height
 
-            fill_fraction = min(1, hours_filled)
-            fill_height = row_height * fill_fraction
             draw.rectangle(
-                [(col_x1, row_y2 - fill_height), (col_x2, row_y2)],
+                [(col_x1, row_y1), (col_x2, row_y2)],
                 fill=color,
                 outline="black",
             )
 
-            # Scale font size for very small fractions
-            scale_font_size = max(6, int(small_font.size * fill_fraction))
-            try:
-                block_font = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", scale_font_size
-                )
-            except:
-                block_font = ImageFont.load_default()
+            if (
+                hours_to_fill >= 0.25
+            ):  
+                try:
+                    scale_font_size = max(6, int(10 * hours_to_fill))
+                    block_font = ImageFont.truetype(
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                        scale_font_size,
+                    )
+                except:
+                    block_font = small_font
 
-            text = str(idx)
-            text = str(idx)
+                text = str(block_idx)
+                bbox = block_font.getbbox(text)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                text_x = col_x1 + ((col_x2 - col_x1) - text_width) / 2
+                text_y = row_y1 + (row_height - text_height) / 2
+                draw.text((text_x, text_y), text, font=block_font, fill="black")
 
-            bbox = block_font.getbbox(text)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            text_x = col_x1 + (col_width - text_width) / 2
-            text_y = row_y2 - fill_height + (fill_height - text_height) / 2
-            draw.text((text_x, text_y), text, font=block_font, fill="black")
-            text_x = col_x1 + (col_width - text_width) / 2
-            text_y = row_y2 - fill_height + (fill_height - text_height) / 2
-            draw.text((text_x, text_y), text, font=block_font, fill="black")
-
-            hours_filled -= fill_fraction
-            block_pointer += fill_fraction
+            hours_needed -= hours_to_fill
+            current_hour += hours_to_fill
 
     daily_hours = defaultdict(float)
     for block in duty_blocks:
-        act = block["activity"].split("(")[0].strip().lower().replace(" ", "_")
-        if act in activities:
-            daily_hours[act] += block["hours"]
+        activity_status = map_activity_to_status(block["activity"])
+        if activity_status in activities:
+            daily_hours[activity_status] += block["hours"]
 
     y_pos = grid_y_start + len(activity_labels) * row_height + 20
     draw.rectangle([(50, y_pos), (1150, y_pos + 100)], outline="black", width=2)
@@ -238,9 +255,22 @@ def generate_eld_sheet(
     y_pos += 120
     draw.rectangle([(50, y_pos), (1450, y_pos + 100)], outline="black", width=2)
     draw.text((60, y_pos + 5), "REMARKS:", font=header_font, fill="black")
-    draw.text(
-        (60, y_pos + 30), daily_info.get("remarks", ""), font=normal_font, fill="black"
-    )
+    remarks = daily_info.get("remarks", "")
+    words = remarks.split()
+    lines = []
+    current_line = ""
+    for word in words:
+        test_line = current_line + " " + word if current_line else word
+        if len(test_line) < 100: 
+            current_line = test_line
+        else:
+            lines.append(current_line)
+            current_line = word
+    if current_line:
+        lines.append(current_line)
+
+    for i, line in enumerate(lines[:3]):  
+        draw.text((60, y_pos + 30 + 20 * i), line, font=normal_font, fill="black")
 
     y_pos += 120
     draw.rectangle([(50, y_pos), (1450, y_pos + 80)], outline="black", width=2)
@@ -252,13 +282,14 @@ def generate_eld_sheet(
         fill="black",
     )
 
+    draw.text(
+        (1400, height - 30),
+        f"Page {day_number} of {total_sheets}",
+        font=normal_font,
+        fill="black",
+    )
+
     return img
-
-
-from typing import List, Dict
-from collections import defaultdict
-from PIL import Image
-import os
 
 
 def generate_multiple_eld_sheets(
@@ -276,21 +307,22 @@ def generate_multiple_eld_sheets(
     """
 
     daily_info_dict = daily_info_dict or {}
-
     day_blocks = defaultdict(list)
     for block in duty_blocks:
-        day_blocks[int(block["day"])].append(block)
+        day_num = int(block["day"])
+        day_blocks[day_num].append(block)
 
     generated_files = []
     total_sheets = len(day_blocks)
-    for idx, day_number in enumerate(sorted(day_blocks.keys()), start=1):
-        blocks_for_day = day_blocks[day_number]
-        info_for_day = daily_info_dict.get(day_number, {})
+
+    for day_num in sorted(day_blocks.keys()):
+        blocks_for_day = day_blocks[day_num]
+        info_for_day = daily_info_dict.get(day_num, {})
         sheet_image = generate_eld_sheet(
-            blocks_for_day, idx, total_sheets, info_for_day
+            blocks_for_day, day_num, total_sheets, info_for_day
         )
 
-        filename = f"ELD_Sheet_Day_{day_number}_of_{total_sheets}.png"
+        filename = f"ELD_Sheet_Day_{day_num}_of_{total_sheets}.png"
         filepath = os.path.join("/tmp", filename)
         sheet_image.save(filepath)
         generated_files.append(filepath)
@@ -298,22 +330,17 @@ def generate_multiple_eld_sheets(
     return generated_files
 
 
-def merge_eld_sheets(
-    sheet_paths: List[str], output_path: str = "/tmp/complete_eld_log.pdf"
-) -> str:
+def merge_eld_sheets(sheet_paths: List[str]) -> bytes:
     """
-    Merge multiple ELD sheet images into a single PDF.
-
-    Args:
-        sheet_paths: List of image file paths
-        output_path: Path for the merged PDF
-
-    Returns:
-        Path to merged PDF
+    Merge multiple ELD sheet images into a single PDF and return its binary content.
     """
     if not sheet_paths:
         raise ValueError("No sheet paths provided to merge.")
 
     images = [Image.open(p).convert("RGB") for p in sheet_paths]
-    images[0].save(output_path, save_all=True, append_images=images[1:])
-    return output_path
+
+    pdf_buffer = BytesIO()
+    images[0].save(pdf_buffer, format="PDF", save_all=True, append_images=images[1:])
+    pdf_buffer.seek(0)
+
+    return pdf_buffer.getvalue()
